@@ -1708,20 +1708,43 @@
       }catch(e){cb(dataUrl);}
     }
     var PH_PROMPT="Voici la photo d\u2019une assiette ou d\u2019un repas. Estime le TOTAL de protéines (grammes) et de calories (kcal) de ce qui est visible. Réponds UNIQUEMENT avec un JSON valide, sans aucun texte autour, sans backticks : {\"name\":\"nom court du plat en français, max 25 caractères\",\"p\":entier grammes de protéines,\"k\":entier kcal,\"detail\":\"une phrase : ce que tu vois et les portions estimées\"}. Si l\u2019image ne montre pas de nourriture, réponds {\"error\":\"pas de nourriture\"}.";
-    function callGemini(b64,mediaType){
-      return fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="+encodeURIComponent(state.gemKey),{
+    var GEM_MODELS=["gemini-3.5-flash","gemini-2.5-flash","gemini-flash-latest","gemini-2.0-flash"];
+    function callGeminiModel(model,b64,mediaType){
+      return fetch("https://generativelanguage.googleapis.com/v1beta/models/"+model+":generateContent?key="+encodeURIComponent(state.gemKey),{
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({contents:[{parts:[
           {inline_data:{mime_type:mediaType,data:b64}},
           {text:PH_PROMPT}
         ]}]})
       }).then(function(r){
-        if(!r.ok)throw new Error("gem"+r.status);
-        return r.json();
-      }).then(function(d){
-        var parts=(d.candidates&&d.candidates[0]&&d.candidates[0].content&&d.candidates[0].content.parts)||[];
-        return parts.map(function(p){return p.text||"";}).join("");
+        return r.json().then(function(d){return {ok:r.ok,status:r.status,d:d};});
       });
+    }
+    function callGemini(b64,mediaType){
+      var lastErr={status:0,msg:""};
+      function tryNext(i){
+        if(i>=GEM_MODELS.length){
+          var e=new Error("gemfail");e.info=lastErr;throw e;
+        }
+        return callGeminiModel(GEM_MODELS[i],b64,mediaType).then(function(res){
+          if(res.ok){
+            var parts=(res.d.candidates&&res.d.candidates[0]&&res.d.candidates[0].content&&res.d.candidates[0].content.parts)||[];
+            var txt=parts.map(function(p){return p.text||"";}).join("");
+            if(txt)return txt;
+            lastErr={status:200,msg:"réponse vide"};
+            return tryNext(i+1);
+          }
+          lastErr={status:res.status,msg:(res.d&&res.d.error&&res.d.error.message)||""};
+          // 404 = modèle inexistant → on tente le suivant ; 400/403 = clé → on tente aussi au cas où
+          if(res.status===404||res.status===400||res.status===403||res.status>=500)return tryNext(i+1);
+          return tryNext(i+1);
+        }).catch(function(err){
+          if(err&&err.message==="gemfail")throw err;
+          lastErr={status:0,msg:"réseau"};
+          return tryNext(i+1);
+        });
+      }
+      return tryNext(0);
     }
     function callAnthropic(b64,mediaType){
       return fetch("https://api.anthropic.com/v1/messages",{
@@ -1757,10 +1780,15 @@
         var msg=err&&err.message?err.message:"";
         if(msg==="notfood"){
           resBox.innerHTML="<div class=\"ph-err\">Je ne vois pas de nourriture sur cette photo 🤔 — réessaie avec ton assiette bien visible.</div>";
-        }else if(msg==="gem400"||msg==="gem403"){
-          resBox.innerHTML="<div class=\"ph-err\"><b>Clé Gemini invalide ou expirée.</b> Vérifie-la dans Profil → Analyse photo (IA), ou recrée-en une sur aistudio.google.com.</div>";
-        }else if(msg.indexOf("gem")===0){
-          resBox.innerHTML="<div class=\"ph-err\"><b>Gemini n\u2019a pas répondu</b> (réseau ou quota gratuit atteint). Réessaie dans une minute.</div>";
+        }else if(msg==="gemfail"){
+          var info=err.info||{},im=(info.msg||"").toLowerCase();
+          if(info.status===400||info.status===403||im.indexOf("api key")>-1||im.indexOf("api_key")>-1||im.indexOf("permission")>-1){
+            resBox.innerHTML="<div class=\"ph-err\"><b>Clé Gemini refusée.</b> Vérifie qu\u2019elle est bien collée dans Profil → 🤖, ou recrée-en une sur aistudio.google.com/apikey. "+(info.msg?"<br><br><span style=\"opacity:.7\">Détail Google : "+esc(info.msg.slice(0,140))+"</span>":"")+"</div>";
+          }else if(info.status===429||im.indexOf("quota")>-1||im.indexOf("rate")>-1){
+            resBox.innerHTML="<div class=\"ph-err\"><b>Quota gratuit atteint.</b> Attends une minute et réessaie — le palier gratuit limite le nombre de photos par minute.</div>";
+          }else{
+            resBox.innerHTML="<div class=\"ph-err\"><b>Gemini n\u2019a pas répondu.</b> Réessaie dans un instant. "+(info.msg?"<br><br><span style=\"opacity:.7\">Détail : "+esc(info.msg.slice(0,140))+"</span>":"")+"</div>";
+          }
         }else{
           resBox.innerHTML="<div class=\"ph-err\"><b>L\u2019analyse IA n\u2019est pas disponible ici.</b> Deux solutions : ouvre l\u2019app depuis notre conversation dans Claude, ou ajoute une clé Gemini gratuite dans Profil → 🤖 Analyse photo (IA) pour que ça marche partout.</div>";
         }
