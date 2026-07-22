@@ -310,11 +310,11 @@
 
   /* BARCODE SCANNER */
   .bc-stage{position:relative;width:100%;aspect-ratio:4/3;background:#000;border-radius:16px;overflow:hidden;margin-bottom:14px}
-  #bcVideo{width:100%;height:100%;object-fit:cover;display:block}
-  .bc-frame{position:absolute;left:12%;right:12%;top:38%;bottom:38%;border:2px solid rgba(255,255,255,.9);border-radius:12px;
-    box-shadow:0 0 0 2000px rgba(0,0,0,.28)}
-  .bc-hint{position:absolute;left:0;right:0;bottom:14px;text-align:center;color:#fff;font-size:12.5px;
-    text-shadow:0 1px 3px rgba(0,0,0,.6);padding:0 20px}
+  #bcReader{width:100%;height:100%}
+  #bcReader video{width:100%!important;height:100%!important;object-fit:cover!important;display:block}
+  #bcReader img{display:none}
+  .bc-hint{position:absolute;left:0;right:0;bottom:14px;text-align:center;color:#fff;font-size:12.5px;z-index:5;
+    text-shadow:0 1px 3px rgba(0,0,0,.6);padding:0 20px;pointer-events:none}
   .bc-manual{display:flex;gap:8px;margin-bottom:8px}
   .bc-manual input{flex:1}
   .bc-manual .btn{flex:0 0 auto;padding:10px 18px}
@@ -1114,9 +1114,8 @@
     <button class="sheet-close" id="bcClose">✕</button>
     <div class="qa-title">Scanner un produit</div>
     <div class="bc-stage" id="bcStage">
-      <video id="bcVideo" playsinline muted></video>
-      <div class="bc-frame"></div>
-      <div class="bc-hint" id="bcHint">Vise le code-barres du produit</div>
+      <div id="bcReader"></div>
+      <div class="bc-hint" id="bcHint">Démarrage de la caméra…</div>
     </div>
     <div class="bc-manual">
       <input type="text" id="bcManual" placeholder="ou tape le code-barres à la main" inputmode="numeric" autocomplete="off">
@@ -1940,75 +1939,62 @@
     setTimeout(openBarcode,220);
   });
 
-  /* SCAN PRODUIT : code-barres + Open Food Facts */
+  /* SCAN PRODUIT : code-barres (html5-qrcode) + Open Food Facts */
   var barcodeSheet=document.getElementById("barcodeSheet");
-  var bcStream=null,bcDetector=null,bcRAF=null,bcActive=false,bcZxing=null;
+  var h5qr=null,h5qrLoading=false,bcRunning=false;
   function openBarcode(){
     barcodeSheet.classList.add("open");
     document.getElementById("bcResult").innerHTML="";
     document.getElementById("bcManual").value="";
-    startCamera();
+    setHint("Démarrage de la caméra…");
+    ensureLib();
+  }
+  function ensureLib(){
+    if(window.Html5Qrcode){startScanner();return;}
+    if(h5qrLoading)return;
+    h5qrLoading=true;
+    var s=document.createElement("script");
+    s.src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js";
+    s.onload=function(){h5qrLoading=false;startScanner();};
+    s.onerror=function(){h5qrLoading=false;setHint("Scanner auto indisponible — tape le code à la main 👇");};
+    document.body.appendChild(s);
+  }
+  function startScanner(){
+    if(!window.Html5Qrcode){setHint("Scanner auto indisponible — tape le code à la main 👇");return;}
+    try{
+      var formats=null;
+      if(window.Html5QrcodeSupportedFormats){
+        formats=[window.Html5QrcodeSupportedFormats.EAN_13,window.Html5QrcodeSupportedFormats.EAN_8,
+          window.Html5QrcodeSupportedFormats.UPC_A,window.Html5QrcodeSupportedFormats.UPC_E,
+          window.Html5QrcodeSupportedFormats.CODE_128];
+      }
+      h5qr=new window.Html5Qrcode("bcReader",{formatsToSupport:formats,verbose:false});
+      var config={fps:10,qrbox:function(w,h){var m=Math.min(w,h);return {width:Math.round(Math.min(w*0.8,320)),height:Math.round(Math.min(h*0.5,180))};},aspectRatio:1.333};
+      h5qr.start({facingMode:"environment"},config,
+        function(decoded){onBarcode(decoded);},
+        function(){}
+      ).then(function(){bcRunning=true;setHint("Vise le code-barres du produit");})
+       .catch(function(err){
+         var msg=String(err||"");
+         if(msg.indexOf("NotAllowed")>-1||msg.indexOf("Permission")>-1)setHint("Accès caméra refusé — tape le code à la main 👇");
+         else setHint("Caméra indisponible — tape le code à la main 👇");
+       });
+    }catch(e){setHint("Scanner auto indisponible — tape le code à la main 👇");}
   }
   function stopCamera(){
-    bcActive=false;
-    if(bcRAF){cancelAnimationFrame(bcRAF);bcRAF=null;}
-    if(bcStream){bcStream.getTracks().forEach(function(t){t.stop();});bcStream=null;}
-    if(bcZxing&&bcZxing.reset){try{bcZxing.reset();}catch(e){}}
+    if(h5qr&&bcRunning){
+      try{h5qr.stop().then(function(){try{h5qr.clear();}catch(e){}h5qr=null;bcRunning=false;}).catch(function(){h5qr=null;bcRunning=false;});}
+      catch(e){h5qr=null;bcRunning=false;}
+    }else{bcRunning=false;}
   }
   function closeBarcode(){barcodeSheet.classList.remove("open");stopCamera();}
   document.getElementById("bcClose").addEventListener("click",closeBarcode);
   barcodeSheet.addEventListener("click",function(ev){if(ev.target===barcodeSheet)closeBarcode();});
   function setHint(t){var h=document.getElementById("bcHint");if(h)h.textContent=t;}
-  function startCamera(){
-    var video=document.getElementById("bcVideo");
-    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
-      setHint("Caméra indisponible — tape le code à la main 👇");return;
-    }
-    navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}}).then(function(stream){
-      bcStream=stream;video.srcObject=stream;video.play();bcActive=true;
-      if("BarcodeDetector" in window){
-        try{
-          bcDetector=new window.BarcodeDetector({formats:["ean_13","ean_8","upc_a","upc_e"]});
-          scanLoop(video);
-          setHint("Vise le code-barres du produit");
-          return;
-        }catch(e){}
-      }
-      // pas de BarcodeDetector (souvent iOS Safari) → fallback ZXing
-      loadZxingFallback(video);
-    }).catch(function(){
-      setHint("Accès caméra refusé — tape le code à la main 👇");
-    });
-  }
-  function scanLoop(video){
-    if(!bcActive||!bcDetector)return;
-    bcDetector.detect(video).then(function(codes){
-      if(codes&&codes.length){onBarcode(codes[0].rawValue);return;}
-      bcRAF=requestAnimationFrame(function(){scanLoop(video);});
-    }).catch(function(){
-      bcRAF=requestAnimationFrame(function(){scanLoop(video);});
-    });
-  }
-  function loadZxingFallback(video){
-    setHint("Chargement du scanner…");
-    var s=document.createElement("script");
-    s.src="https://cdnjs.cloudflare.com/ajax/libs/zxing-js-library/0.20.0/umd/index.min.js";
-    s.onload=function(){
-      try{
-        var ZX=window.ZXing;
-        bcZxing=new ZX.BrowserMultiFormatReader();
-        bcZxing.decodeFromVideoElement(video,function(result,err){
-          if(result&&result.text){onBarcode(result.text);}
-        });
-        setHint("Vise le code-barres du produit");
-      }catch(e){setHint("Scanner auto indisponible — tape le code à la main 👇");}
-    };
-    s.onerror=function(){setHint("Scanner auto indisponible — tape le code à la main 👇");};
-    document.body.appendChild(s);
-  }
   var bcLast=0;
   function onBarcode(code){
     var now=Date.now();if(now-bcLast<1500)return;bcLast=now;
+    code=String(code).replace(/\D/g,"");
     if(!/^\d{6,14}$/.test(code))return;
     stopCamera();
     setHint("Code détecté : "+code);
